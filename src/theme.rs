@@ -449,7 +449,8 @@ impl Palette {
         }
     }
 
-    /// Group-sender color derived from the avatar hue.
+    /// The colour of a group member's name and quote bar, from the hue
+    /// [`member_hues`] gave them.
     pub fn sender(&self, hue: f32) -> Color32 {
         if self.dark {
             hsl(hue, 0.6, 0.68)
@@ -458,15 +459,73 @@ impl Palette {
         }
     }
 
-    /// Avatar background derived from the chat hue.
+    /// The disc behind a picture-less avatar's initials or group icon: the
+    /// panel tinted with the chat's hue, as WhatsApp draws them, so a column
+    /// of them stays quiet beside the pictures around it in any palette.
     pub fn avatar(&self, hue: f32) -> Color32 {
-        let (saturation, lightness) = if self.dark {
-            (0.38, 0.42)
-        } else {
-            (0.45, 0.62)
-        };
-        hsl(hue, saturation, lightness)
+        self.panel.lerp_to_gamma(hsl(hue, 0.5, 0.5), AVATAR_TINT)
     }
+
+    /// The initials or icon on an [`Palette::avatar`] disc of the same hue:
+    /// the hue itself, light on a dark disc and deep on a light one, moved
+    /// toward the text colour where it would not read.
+    pub fn avatar_glyph(&self, hue: f32) -> Color32 {
+        let glyph = if self.dark {
+            hsl(hue, 0.55, 0.76)
+        } else {
+            hsl(hue, 0.45, 0.34)
+        };
+        readable_on(self.avatar(hue), glyph, self.text, 4.5)
+    }
+}
+
+/// The hues group members' names and quote bars take: twelve around the
+/// wheel, spaced wider through the greens, where neighbouring hues look most
+/// alike.
+pub const MEMBER_HUES: [f32; 12] = [
+    4.0, 28.0, 48.0, 80.0, 130.0, 165.0, 192.0, 215.0, 245.0, 275.0, 305.0, 335.0,
+];
+
+/// How far a member moves along [`MEMBER_HUES`] from a hue someone already
+/// has: coprime with their number, so every hue is reached, and long enough
+/// that the member lands well away from the taken hue, not on its neighbour.
+const MEMBER_HUE_STEP: usize = 5;
+
+/// Gives each of a group's members one of [`MEMBER_HUES`]: a hue of their own
+/// while the group has no more members than there are hues, and the hues
+/// shared out evenly beyond that. Each member starts from the hue their id
+/// picks, and when someone before them by id already has it, steps on to the
+/// next least used one. Picking by id alone gave two people neighbouring
+/// hues often enough that a group's names could not be told apart.
+pub fn member_hues(members: &[String]) -> std::collections::HashMap<&str, f32> {
+    let mut sorted: Vec<&str> = members.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut uses = [0_usize; MEMBER_HUES.len()];
+    let mut hues = std::collections::HashMap::with_capacity(sorted.len());
+    for member in sorted {
+        let least = uses.iter().copied().min().unwrap_or_default();
+        let mut slot = member_slot(member);
+        while uses[slot] > least {
+            slot = (slot + MEMBER_HUE_STEP) % MEMBER_HUES.len();
+        }
+        uses[slot] += 1;
+        hues.insert(member, MEMBER_HUES[slot]);
+    }
+    hues
+}
+
+/// The hue of `id`'s name: theirs among a group's [`member_hues`], or the one
+/// their id picks for someone not in the group (anymore) and outside groups.
+pub fn member_hue(hues: &std::collections::HashMap<&str, f32>, id: &str) -> f32 {
+    hues.get(id)
+        .copied()
+        .unwrap_or_else(|| MEMBER_HUES[member_slot(id)])
+}
+
+/// The place in [`MEMBER_HUES`] an id picks on its own.
+fn member_slot(id: &str) -> usize {
+    crate::util::hue(id) as usize % MEMBER_HUES.len()
 }
 
 impl fastframe_theme::Palette for Palette {
@@ -590,6 +649,8 @@ const LIGHT_SHADOW_ALPHA: u8 = 50;
 const LIGHT_EDGE_TINT: f32 = 0.48;
 /// How thick the raised edge is, in points.
 pub const RAISED_EDGE: f32 = 1.0;
+/// How much of its hue tints a picture-less avatar's disc over the panel.
+const AVATAR_TINT: f32 = 0.22;
 
 /// `color` with its opacity scaled by `factor`, up to opaque.
 fn denser(color: Color32, factor: f32) -> Color32 {
@@ -1980,5 +2041,89 @@ mod tests {
         assert_eq!(hsl(0.0, 1.0, 0.5), Color32::from_rgb(255, 0, 0));
         assert_eq!(hsl(120.0, 1.0, 0.5), Color32::from_rgb(0, 255, 0));
         assert_eq!(hsl(240.0, 1.0, 0.5), Color32::from_rgb(0, 0, 255));
+    }
+
+    /// Synthetic member ids, the first two of which pick the same hue on
+    /// their own.
+    fn clashing_members(count: usize) -> Vec<String> {
+        let ids: Vec<String> = (0..)
+            .map(|n| format!("member-{n}@s.whatsapp.net"))
+            .take(200)
+            .collect();
+        let (first, second) = ids
+            .iter()
+            .enumerate()
+            .find_map(|(index, id)| {
+                ids[..index]
+                    .iter()
+                    .find(|earlier| member_slot(earlier) == member_slot(id))
+                    .map(|earlier| (earlier.clone(), id.clone()))
+            })
+            .expect("two ids that pick one hue");
+        let mut members = vec![first.clone(), second.clone()];
+        members.extend(ids.into_iter().filter(|id| *id != first && *id != second));
+        members.truncate(count);
+        members
+    }
+
+    #[test]
+    fn members_who_pick_one_hue_get_different_ones() {
+        let members = clashing_members(2);
+        assert_eq!(member_slot(&members[0]), member_slot(&members[1]));
+        let hues = member_hues(&members);
+        assert_ne!(hues[members[0].as_str()], hues[members[1].as_str()]);
+    }
+
+    #[test]
+    fn a_group_as_large_as_the_palette_uses_every_hue_once() {
+        let members = clashing_members(MEMBER_HUES.len());
+        let hues = member_hues(&members);
+        let mut taken: Vec<u32> = hues.values().map(|hue| *hue as u32).collect();
+        taken.sort_unstable();
+        taken.dedup();
+        assert_eq!(taken.len(), MEMBER_HUES.len());
+        // Beyond the palette the hues are shared out evenly.
+        let members = clashing_members(MEMBER_HUES.len() * 2 + 1);
+        let hues = member_hues(&members);
+        for hue in MEMBER_HUES {
+            let uses = hues.values().filter(|taken| **taken == hue).count();
+            assert!((2..=3).contains(&uses), "{hue} is used {uses} times");
+        }
+    }
+
+    #[test]
+    fn member_hues_do_not_follow_the_order_of_the_member_list() {
+        let members = clashing_members(9);
+        let mut reversed = members.clone();
+        reversed.reverse();
+        assert_eq!(member_hues(&members), member_hues(&reversed));
+        // Someone outside the group keeps the hue their id picks.
+        let hues = member_hues(&members);
+        assert_eq!(
+            member_hue(&hues, "stranger@s.whatsapp.net"),
+            MEMBER_HUES[member_slot("stranger@s.whatsapp.net")]
+        );
+    }
+
+    #[test]
+    fn picture_less_avatars_are_quiet_discs_with_readable_initials() {
+        for palette in [Palette::dark(), Palette::light(), Palette::messages()] {
+            for hue in [0.0, 60.0, 120.0, 210.0, 300.0] {
+                let disc = palette.avatar(hue);
+                let glyph = palette.avatar_glyph(hue);
+                assert!(
+                    contrast(disc, glyph) >= 4.5,
+                    "{hue} in {}: {disc:?} {glyph:?}",
+                    palette.dark
+                );
+                // The disc stays near the panel, well short of the glyph.
+                assert!(
+                    contrast(disc, palette.panel) < 2.0,
+                    "{hue} in {}: {disc:?} on {:?}",
+                    palette.dark,
+                    palette.panel
+                );
+            }
+        }
     }
 }

@@ -368,17 +368,19 @@ pub fn paint_avatar(
         }
     }
     if !painted {
-        let fill = palette.avatar(crate::util::hue(id));
-        ui.painter().circle_filled(rect.center(), size / 2.0, fill);
+        let hue = crate::util::hue(id);
+        ui.painter()
+            .circle_filled(rect.center(), size / 2.0, palette.avatar(hue));
+        let glyph = palette.avatar_glyph(hue);
         if crate::model::ChatKind::from_id(id) == crate::model::ChatKind::Group {
-            theme::paint_icon(ui, Icon::Users, rect, size * 0.5, Color32::WHITE);
+            theme::paint_icon(ui, Icon::Users, rect, size * 0.5, glyph);
         } else {
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 crate::util::initials(name),
                 theme::semibold(size * 0.38),
-                Color32::WHITE,
+                glyph,
             );
         }
     }

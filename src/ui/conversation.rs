@@ -1253,17 +1253,18 @@ fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id
                     );
                     let everyone = id == crate::mentions::ALL_ID;
                     if everyone {
+                        let hue = crate::util::hue(id);
                         ui.painter().circle_filled(
                             avatar.center(),
                             avatar.width() / 2.0,
-                            palette.avatar(crate::util::hue(id)),
+                            palette.avatar(hue),
                         );
                         theme::paint_icon(
                             ui,
                             Icon::Users,
                             avatar,
                             avatar.width() * 0.5,
-                            Color32::WHITE,
+                            palette.avatar_glyph(hue),
                         );
                     } else {
                         let picture = app.avatar(id);
@@ -1345,6 +1346,9 @@ fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id
 /// Draws the composer and queues sends with the originating account and selected mentions.
 fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
     let palette = app.palette;
+    // The conversation's height under its header, which a long draft may
+    // take a share of.
+    let room = ui.available_height();
     let shown = egui::Panel::bottom("composer")
         .show_separator_line(false)
         .frame(
@@ -1526,8 +1530,11 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                 .size()
                 .y;
             // Every control sits in a band as tall as a one-line field at the
-            // bottom of the row, centred on it. The field grows to six lines
-            // above that band, so the buttons stay beside its last line.
+            // bottom of the row, centred on it. The field grows above that
+            // band, so the buttons stay beside its last line: to six lines, or
+            // to a share of a taller conversation, so a long draft can be read
+            // and selected without scrolling it a few lines at a time.
+            let tallest = (line_height * COMPOSER_LINES).max(room * COMPOSER_SHARE);
             // A one-line field, like the composer before the rounded field:
             // the text line with padding, the send button as tall as that.
             let line = (line_height + COMPOSER_PADDING)
@@ -1542,7 +1549,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
             // field and the panel holding it grow on the keystroke that wraps
             // a line rather than a frame later, which made them jump.
             let wrap_id = id.with("wrap");
-            let text_height = ui
+            let draft_height = ui
                 .ctx()
                 .data(|data| data.get_temp::<f32>(wrap_id))
                 .map(|wrap| {
@@ -1554,8 +1561,10 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                         .y
                 })
                 .or_else(|| ui.ctx().read_response(id).map(|previous| previous.rect.height()))
-                .unwrap_or(line_height)
-                .clamp(line_height, line_height * 6.0);
+                .unwrap_or(line_height);
+            let text_height = draft_height.clamp(line_height, tallest);
+            // Only a draft taller than the field scrolls inside it.
+            let overflows = draft_height > text_height + 0.5;
             let row_height = (text_height + 2.0 * field_margin).max(line);
             let pill = widgets::raised(ui, &palette, composer_pill(&palette), |ui| {
             ui.allocate_ui_with_layout(
@@ -1634,15 +1643,42 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                         ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         ui.add_space(top);
-                        // Grow from one to six lines, then scroll. The height
-                        // is this frame's draft, measured above, rather than
-                        // the scroll area's memory of the last frame.
+                        // Grow from one line to the tallest field, then
+                        // scroll. The height is this frame's draft, measured
+                        // above, rather than the scroll area's memory of the
+                        // last frame.
                         egui::ScrollArea::vertical()
                             .id_salt("composer-scroll")
                             .max_height(text_height)
                             .min_scrolled_height(text_height)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
+                                // A selection dragged past the field's top or
+                                // bottom scrolls the draft, as one in the
+                                // messages does: the leash holds the pointer
+                                // at the edge, and the field moves under it.
+                                let viewport = ui.clip_rect();
+                                *app.composer_view.lock().unwrap_or_else(|p| p.into_inner()) =
+                                    Some(viewport);
+                                if overflows
+                                    && ui.ctx().is_being_dragged(id)
+                                    && let Some(pointer) =
+                                        ui.input(|input| input.pointer.latest_pos())
+                                {
+                                    let speed = composer_edge_scroll(
+                                        pointer.y,
+                                        viewport.top(),
+                                        viewport.bottom(),
+                                    );
+                                    if speed != 0.0 {
+                                        let dt = ui.input(|input| input.stable_dt.min(0.1));
+                                        ui.scroll_with_delta_animation(
+                                            vec2(0.0, -speed * dt),
+                                            egui::style::ScrollAnimation::none(),
+                                        );
+                                        ui.ctx().request_repaint();
+                                    }
+                                }
                                 // Keep emoji in the buffer so character offsets match, then
                                 // paint their color bitmaps over the transparent glyphs.
                                 let mut clusters: Vec<(usize, usize, String)> = Vec::new();
@@ -1734,7 +1770,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                 .0
                                 .size()
                                 .y
-                                .clamp(line_height, line_height * 6.0);
+                                .clamp(line_height, tallest);
                                 ui.ctx().data_mut(|data| {
                                     data.insert_temp(composer_text_id(), painted);
                                 });
@@ -1943,6 +1979,12 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
 
 /// Corner radius of the composer's rounded field.
 const COMPOSER_RADIUS: u8 = 24;
+/// How many lines the composer's field grows to before its draft scrolls, at
+/// least.
+const COMPOSER_LINES: f32 = 6.0;
+/// The share of the conversation's height the field may grow to, where that
+/// is more than [`COMPOSER_LINES`]: the messages keep most of the window.
+const COMPOSER_SHARE: f32 = 0.4;
 /// Padding around the text of a one-line composer row. The row, and the send
 /// and record button, are one text line plus this; the controls are centred
 /// on it.
@@ -2260,6 +2302,8 @@ struct View<'a> {
     /// Resolves mention names without replacing our name with "You".
     mention_names: &'a dyn Fn(&str) -> String,
     avatars: &'a HashMap<String, Option<PathBuf>>,
+    /// The hue of each group member's name: see [`theme::member_hues`].
+    member_hues: &'a HashMap<&'a str, f32>,
     contacts: &'a HashMap<String, crate::model::Contact>,
     now: i64,
     /// Animate media only while this window is active.
@@ -2597,6 +2641,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
     }
     let names_or = |id: &str, hint: Option<&str>| app.display_name_or(id, hint);
     let mention_names = |id: &str| app.mention_name(id);
+    let member_hues = theme::member_hues(&chat.participants);
     let keyboard_navigation = std::cell::Cell::new(false);
     // The list's name says whose messages it holds. Built only while a screen
     // reader is attached, like the rows' labels, once the list's node exists.
@@ -2639,6 +2684,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
         names_or: &names_or,
         mention_names: &mention_names,
         avatars: &avatars,
+        member_hues: &member_hues,
         contacts: &app.contacts,
         now: crate::util::now(),
         animate: app.window_focused,
@@ -4310,20 +4356,45 @@ fn bubble(
     response
 }
 
-/// Clamps message-selection drags to the view while the pointer is outside it.
-/// This keeps a row under the pointer during edge scrolling. The input hook
+/// Clamps message-selection drags to the view while the pointer is outside it,
+/// and text-selection drags in the composer to its visible text. This keeps a
+/// row under the pointer during edge scrolling: the composer sits at the
+/// window's foot, where a drag down leaves the window at once. The input hook
 /// adjusts positions before egui processes them, using the previous frame's
-/// view rectangle.
+/// rectangles.
 pub struct SelectionLeash {
     pub view: std::sync::Arc<std::sync::Mutex<Option<Rect>>>,
-    holding: bool,
+    /// The composer's visible text, as [`App::composer_view`] holds it.
+    pub composer: std::sync::Arc<std::sync::Mutex<Option<Rect>>>,
+    holding: Option<Leashed>,
+}
+
+/// What a held drag is leashed to.
+#[derive(Clone, Copy)]
+enum Leashed {
+    Messages,
+    Composer,
+}
+
+impl Leashed {
+    /// Brings a position outside `rect`, this leash's rectangle, back in.
+    fn clamp(self, pos: egui::Pos2, rect: Rect) -> egui::Pos2 {
+        match self {
+            Self::Messages => clamp_into(pos, rect),
+            Self::Composer => clamp_into_text(pos, rect),
+        }
+    }
 }
 
 impl SelectionLeash {
-    pub fn new(view: std::sync::Arc<std::sync::Mutex<Option<Rect>>>) -> Self {
+    pub fn new(
+        view: std::sync::Arc<std::sync::Mutex<Option<Rect>>>,
+        composer: std::sync::Arc<std::sync::Mutex<Option<Rect>>>,
+    ) -> Self {
         Self {
             view,
-            holding: false,
+            composer,
+            holding: None,
         }
     }
 }
@@ -4334,18 +4405,24 @@ impl egui::plugin::Plugin for SelectionLeash {
     }
 
     fn input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
-        let Some(view) = *self.view.lock().unwrap_or_else(|p| p.into_inner()) else {
-            self.holding = false;
-            return;
-        };
+        let view = *self.view.lock().unwrap_or_else(|p| p.into_inner());
+        let composer = *self.composer.lock().unwrap_or_else(|p| p.into_inner());
         // The chat list's resize handle reaches into the view from its left
         // edge, as the scroll bar does on the right. Leashing a drag of the
         // handle pinned the pointer, and the list's edge, just inside the
         // view: stuck at its widest, or growing while dragged left (#239).
         let handle = ctx.global_style().interaction.resize_grab_radius_side;
-        let inside = |pos: &egui::Pos2| {
+        let inside = |view: Rect, pos: &egui::Pos2| {
             view.contains(*pos) && pos.x >= view.left() + handle && pos.x < view.right() - 16.0
         };
+        let leash = |held: Leashed| match held {
+            Leashed::Messages => view,
+            Leashed::Composer => composer,
+        };
+        // A rectangle no longer drawn lets its drag go.
+        if self.holding.is_some_and(|held| leash(held).is_none()) {
+            self.holding = None;
+        }
         let mut gone = Vec::new();
         for (index, event) in input.events.iter_mut().enumerate() {
             match event {
@@ -4356,19 +4433,33 @@ impl egui::plugin::Plugin for SelectionLeash {
                     ..
                 } => {
                     if *pressed {
-                        self.holding = inside(pos);
+                        self.holding = if view.is_some_and(|view| inside(view, pos)) {
+                            Some(Leashed::Messages)
+                        } else if composer.is_some_and(|text| text.contains(*pos)) {
+                            Some(Leashed::Composer)
+                        } else {
+                            None
+                        };
                     } else {
-                        if self.holding && !view.contains(*pos) {
-                            *pos = clamp_into(*pos, view);
+                        if let Some(held) = self.holding
+                            && let Some(rect) = leash(held)
+                            && !rect.contains(*pos)
+                        {
+                            *pos = held.clamp(*pos, rect);
                         }
-                        self.holding = false;
+                        self.holding = None;
                     }
                 }
-                egui::Event::PointerMoved(pos) if self.holding && !view.contains(*pos) => {
-                    *pos = clamp_into(*pos, view);
+                egui::Event::PointerMoved(pos) => {
+                    if let Some(held) = self.holding
+                        && let Some(rect) = leash(held)
+                        && !rect.contains(*pos)
+                    {
+                        *pos = held.clamp(*pos, rect);
+                    }
                 }
                 // Ignore PointerGone during a drag so selection continues.
-                egui::Event::PointerGone if self.holding => gone.push(index),
+                egui::Event::PointerGone if self.holding.is_some() => gone.push(index),
                 _ => {}
             }
         }
@@ -4382,6 +4473,16 @@ fn clamp_into(pos: egui::Pos2, view: Rect) -> egui::Pos2 {
     egui::pos2(
         pos.x.clamp(view.left() + 2.0, view.right() - 18.0),
         pos.y.clamp(view.top() + 2.0, view.bottom() - 2.0),
+    )
+}
+
+/// Holds a position on the composer's visible text: across its whole width,
+/// so a line's ends can still be reached, and just inside its top and bottom,
+/// on the edge [`composer_edge_scroll`] scrolls at.
+fn clamp_into_text(pos: egui::Pos2, text: Rect) -> egui::Pos2 {
+    egui::pos2(
+        pos.x.clamp(text.left(), text.right()),
+        pos.y.clamp(text.top() + 2.0, text.bottom() - 2.0),
     )
 }
 
@@ -4536,6 +4637,23 @@ pub fn edge_scroll(pointer: f32, top: f32, bottom: f32) -> f32 {
         -(top + EDGE - pointer).min(EDGE * 1.5) * PACE
     } else if pointer > bottom - EDGE {
         (pointer - (bottom - EDGE)).min(EDGE * 1.5) * PACE
+    } else {
+        0.0
+    }
+}
+
+/// How fast, in points a second, the composer's draft scrolls while a
+/// selection is held at `pointer`: at full speed within a few points of the
+/// field's top or bottom edge, where the leash holds a pointer dragged past
+/// it, and not at all elsewhere. A field a few lines tall has no room for the
+/// messages' wide, graded edge (see [`edge_scroll`]).
+pub fn composer_edge_scroll(pointer: f32, top: f32, bottom: f32) -> f32 {
+    const EDGE: f32 = 4.0;
+    const SPEED: f32 = 240.0;
+    if pointer < top + EDGE {
+        -SPEED
+    } else if pointer > bottom - EDGE {
+        SPEED
     } else {
         0.0
     }
@@ -4868,7 +4986,7 @@ fn bubble_frame(
                     ui,
                     &name,
                     theme::semibold(13.0),
-                    palette.sender(crate::util::hue(&message.sender)),
+                    palette.sender(theme::member_hue(view.member_hues, &message.sender)),
                 );
                 let response = ui
                     .interact(
@@ -5303,7 +5421,7 @@ fn quote_block(
             if mine {
                 palette.accent
             } else {
-                palette.sender(crate::util::hue(&quoted.sender))
+                palette.sender(theme::member_hue(view.member_hues, &quoted.sender))
             },
             palette.text,
             3.0,
@@ -6116,6 +6234,7 @@ pub(crate) fn list_menu(
     let names_or = |id: &str, hint: Option<&str>| app.display_name_or(id, hint);
     let mention_names = |id: &str| app.mention_name(id);
     let avatars = HashMap::new();
+    let member_hues = theme::member_hues(&chat.participants);
     let keyboard_navigation = std::cell::Cell::new(false);
     let view = View {
         palette: app.palette,
@@ -6136,6 +6255,7 @@ pub(crate) fn list_menu(
         names_or: &names_or,
         mention_names: &mention_names,
         avatars: &avatars,
+        member_hues: &member_hues,
         contacts: &app.contacts,
         now: crate::util::now(),
         // A row drawn outside the conversation holds still.
@@ -11182,6 +11302,7 @@ mod tests {
         let names_or = |id: &str, hint: Option<&str>| app.display_name_or(id, hint);
         let mention_names = |id: &str| app.mention_name(id);
         let avatars = HashMap::new();
+        let member_hues = HashMap::new();
         let keyboard_navigation = std::cell::Cell::new(false);
         let view = View {
             palette: Palette::dark(),
@@ -11201,6 +11322,7 @@ mod tests {
             names_or: &names_or,
             mention_names: &mention_names,
             avatars: &avatars,
+            member_hues: &member_hues,
             contacts: &app.contacts,
             now: 0,
             animate: false,

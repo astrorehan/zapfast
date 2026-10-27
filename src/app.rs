@@ -600,6 +600,9 @@ pub struct App {
     pub copy_rows: std::sync::Arc<std::sync::Mutex<Vec<crate::transcript::Row>>>,
     /// Previous message-list rect used by the selection hook.
     pub selection_view: std::sync::Arc<std::sync::Mutex<Option<egui::Rect>>>,
+    /// The composer's visible text as of the previous frame, which the
+    /// selection hook holds a drag that starts in it to.
+    pub composer_view: std::sync::Arc<std::sync::Mutex<Option<egui::Rect>>>,
     pub gif_query: String,
     pub gif_results: Vec<Gif>,
     /// Whether a GIF search is active.
@@ -1460,6 +1463,7 @@ impl App {
             viewer_media_state: HashMap::new(),
             copy_rows: Default::default(),
             selection_view: Default::default(),
+            composer_view: Default::default(),
             gif_query: String::new(),
             gif_results: Vec::new(),
             gif_pending: false,
@@ -2263,6 +2267,7 @@ impl App {
         });
         ctx.add_plugin(crate::ui::conversation::SelectionLeash::new(
             std::sync::Arc::clone(&self.selection_view),
+            std::sync::Arc::clone(&self.composer_view),
         ));
         // Colour emoji in labels, menus, tooltips and text fields; message
         // bodies paint their own over placeholders, which it leaves alone.
@@ -10024,6 +10029,7 @@ impl App {
             .selection_view
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = None;
+        *self.composer_view.lock().unwrap_or_else(|p| p.into_inner()) = None;
         self.apply_theme(ctx);
         if ctx.input(|input| input.events.iter().any(is_user_input)) {
             self.app_lock.note_input();
