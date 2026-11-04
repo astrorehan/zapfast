@@ -1,0 +1,72 @@
+name: Fork Windows build
+
+# A Windows build of this fork's main, for installing it here. It is not a
+# release: the binary is unsigned, and the built-in updater still offers the
+# official releases. Every zip carries a build provenance attestation, so
+# `gh attestation verify <zip> -R astrorehan/zapfast` ties it to the commit
+# and the run that made it.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  ZAPFAST_GIPHY_KEY: ${{ secrets.ZAPFAST_GIPHY_KEY }}
+
+jobs:
+  build:
+    name: build (x86_64-pc-windows-msvc)
+    # The official repository has its own release workflow.
+    if: github.repository == 'astrorehan/zapfast'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      # The repository pins its toolchain; add the target to the one the pin
+      # resolves to.
+      - run: rustup target add x86_64-pc-windows-msvc
+      # No compiler cache, as in the release workflow: the binary never builds
+      # from outputs restored from an Actions cache.
+      - run: cargo build --locked --release --target x86_64-pc-windows-msvc
+
+      # No portable marker: the build keeps its state where an installed copy
+      # does, so it opens the same linked account.
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          name="zapfast-v${version}-${GITHUB_SHA::7}-x86_64-pc-windows-msvc"
+          mkdir -p "dist/$name"
+          cp target/x86_64-pc-windows-msvc/release/zapfast.exe README.md LICENSE THIRD-PARTY-NOTICES.md "dist/$name/"
+          cd dist
+          7z a "$name.zip" "$name"
+          sha256sum "$name.zip" "$name/zapfast.exe" > "$name.sha256"
+          cat "$name.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
